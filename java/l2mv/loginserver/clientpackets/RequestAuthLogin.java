@@ -11,10 +11,7 @@ import l2mv.loginserver.accounts.SessionManager;
 import l2mv.loginserver.accounts.SessionManager.Session;
 import l2mv.loginserver.crypt.PasswordHash;
 import l2mv.loginserver.gameservercon.GameServer;
-import l2mv.loginserver.gameservercon.SendablePacket;
 import l2mv.loginserver.gameservercon.lspackets.GetAccountInfo;
-import l2mv.loginserver.gameservercon.lspackets.OnWrongAccountPassword;
-import l2mv.loginserver.serverpackets.LoginFail;
 import l2mv.loginserver.serverpackets.LoginFail.LoginFailReason;
 import l2mv.loginserver.serverpackets.LoginOk;
 
@@ -104,8 +101,20 @@ public class RequestAuthLogin extends L2LoginClientPacket
 		{
 			account.setAllowedIP("");
 			account.setAllowedHwid("");
-			account.setPasswordHash(password);
-			account.save();
+			
+			// Importante: salvar a senha já criptografada, igual a base espera no login.
+			account.setPasswordHash(passwordHash);
+			
+			account.setLastAccess(currentTime);
+			account.setLastIP(client.getIpAddress());
+			
+			if (account.getPasswordHash() == null)
+			{
+				_log.warn("Falha ao criar nova conta no banco de dados: " + user + ". Verifique se Account.save() faz INSERT e não apenas UPDATE.");
+				client.close(LoginFailReason.REASON_USER_OR_PASS_WRONG);
+				return;
+			}
+			
 			afterConnection(account, passwordHash, password, client, user);
 			return;
 		}
@@ -144,17 +153,16 @@ public class RequestAuthLogin extends L2LoginClientPacket
 		
 		if (!passwordCorrect)
 		{
-			_log.warn("IP: " + client.getConnection().getSocket().getInetAddress() + " wrote Wrong Password(Written: " + password + ", Current: " + account.getPasswordHash() + ") Password to Account: " + account.getLogin());
-			final SendablePacket wrongPasswordPacket = new OnWrongAccountPassword(account.getLogin(), password);
-			for (GameServer gs : GameServerManager.getInstance().getGameServers())
+			// check if the password is not encrypted by one of the older but supported algorithms
+			for (PasswordHash c : Config.LEGACY_CRYPT)
 			{
-				if (gs.getProtocol() >= 2 && gs.isAuthed())
+				if (c.compare(password, account.getPasswordHash()))
 				{
-					gs.sendPacket(wrongPasswordPacket);
+					passwordCorrect = true;
+					account.setPasswordHash(passwordHash);
+					break;
 				}
 			}
-			client.close(LoginFail.LoginFailReason.REASON_USER_OR_PASS_WRONG);
-			return;
 		}
 		
 		if ((account.getAccessLevel() < 0) || (account.getBanExpire() > currentTime))
@@ -179,6 +187,8 @@ public class RequestAuthLogin extends L2LoginClientPacket
 		
 		account.setLastAccess(currentTime);
 		account.setLastIP(client.getIpAddress());
+		
+		account.save();
 		
 		Session session = SessionManager.getInstance().openSession(account);
 		
